@@ -1,0 +1,722 @@
+---
+title: "Heart Cell Atlas - Single Cell RNA-seq"
+author: "Michayla Moore"
+date: "2024-08-16"
+output:
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Download data
+```{r, include=FALSE, warning=FALSE}
+#install.packages("BiocManager")
+#BiocManager::install(c("zellkonverter", "SingleCellExperiment", "Seurat"))
+library(reticulate)
+library(zellkonverter)
+library(SingleCellExperiment)
+library(Seurat)
+library(scater)
+library(scuttle)
+library(edgeR)
+library(dplyr)
+library(RColorBrewer)
+```
+
+```{r, warning=FALSE}
+# Load the H5AD file
+sce_FB <- readH5AD("C:/Users/micha/OneDrive/Documents/SingleCell_Heart_Global/hca_heart_fibroblasts_raw.h5ad")
+sce_EC <- readH5AD("C:/Users/micha/OneDrive/Documents/hca_heart_vascular_raw.h5ad")
+```
+
+```{r}
+head(sce_EC, 5)
+head(sce_FB, 5)
+```
+
+```{r}
+# Convert SingleCellExperiment to Seurat object using the assay "X"
+seurat_obj_EC <- CreateSeuratObject(counts = assays(sce_EC)$X, project = "HeartCellAtlasEC_Moore")
+seurat_obj_FB <- CreateSeuratObject(counts = assays(sce_FB)$X, project = "HeartCellAtlasFB_Moore")
+
+#metadata_EC <- as.data.frame(seurat_obj_EC@meta.data)
+#metadata_FB <- as.data.frame(seurat_obj_FB@meta.data)
+```
+
+
+# Merge
+```{r}
+# Assuming seurat_obj1 and seurat_obj2 are your Seurat objects
+seurat_obj_merge <- merge(seurat_obj_EC, y = seurat_obj_FB, project = "merged_project")
+
+seurat_obj_merge <- JoinLayers(seurat_obj_merge)
+```
+
+
+# Remove Zeros
+```{r}
+# It’s often a good idea to remove genes with zero counts across all cells before normalization. 
+# Removing these genes can reduce the computational burden and memory usage, especially for large datasets.
+
+# Extract the RNA assay count matrix
+count_matrix <- GetAssayData(seurat_obj_merge, assay = "RNA", layer = "counts")
+
+# Filter out genes that have zero counts across all cells
+non_zero_genes <- rowSums(count_matrix) > 0
+
+# Subset the Seurat object to keep only these non-zero genes
+seurat_obj_merge <- subset(seurat_obj_merge, features = rownames(count_matrix)[non_zero_genes])
+
+# Check the new dimensions of the Seurat object
+dim(seurat_obj_merge)
+
+# Get the filtered count matrix
+filtered_count_matrix <- GetAssayData(seurat_obj_merge, assay = "RNA", layer = "counts")
+
+# Check if there are any genes with all zero counts
+sum(rowSums(filtered_count_matrix) == 0)
+
+```
+
+# Normalize data
+```{r}
+# Normalize the data
+seurat_obj_merge <- NormalizeData(seurat_obj_merge)
+
+# SCT (SCTransform) Normalization: If you want to perform normalization that also accounts for technical #noise and batch effects, you can use SCTransform normalization.
+# seurat_obj <- SCTransform(seurat_obj)
+
+# Find variable features
+seurat_obj_merge <- FindVariableFeatures(seurat_obj_merge)
+
+# Scale the data
+seurat_obj_merge <- ScaleData(seurat_obj_merge)
+
+# Run PCA
+seurat_obj_merge <- RunPCA(seurat_obj_merge)
+
+# Visualize PCA results
+DimPlot(seurat_obj_merge, reduction = "pca")
+```
+
+
+```{r, include=FALSE}
+# Check the format of the metadata in `colData(sce)`
+metadata_FB_after <- colData(sce_FB)
+print(metadata_FB_after)
+
+# Convert colData to a data.frame if it's not already in that format
+metadata_FB_after_df <- as.data.frame(colData(sce_FB))
+
+# Check the format of the metadata in `colData(sce)`
+metadata_EC_after <- colData(sce_EC)
+print(metadata_EC_after)
+
+# Convert colData to a data.frame if it's not already in that format
+metadata_EC_after_df <- as.data.frame(colData(sce_EC))
+
+# Combine data frames
+#combined_metadata <- rbind(metadata_FB_after_df, metadata_EC_after_df)
+
+combined_metadata_switch <- rbind(metadata_EC_after_df, metadata_FB_after_df)
+
+# Ensure that row names of metadata_df match column names of the Seurat object
+row.names(combined_metadata_switch) <- colnames(seurat_obj_merge)
+
+# Add metadata to Seurat object
+seurat_obj_merge <- AddMetaData(seurat_obj_merge, metadata = combined_metadata_switch)
+
+```
+
+```{r}
+# save as RDS file
+save(seurat_obj_merge, file="seurat_obj_merge.Rds")
+```
+
+```{r}
+head(seurat_obj_merge@meta.data)
+```
+
+```{r}
+# How many PC's? Typically, 1:20
+# Plot the proportion of variance explained by each PC
+ElbowPlot(seurat_obj_merge)
+
+# Check cumulative variance
+pc_variance <- seurat_obj_merge[["pca"]]@stdev^2
+cumulative_variance <- cumsum(pc_variance) / sum(pc_variance)
+
+# Plot cumulative variance
+plot(cumulative_variance, type = 'b', xlab = 'Number of PCs', ylab = 'Cumulative Variance')
+
+```
+
+
+```{r}
+# Find neighbors for clustering
+seurat_obj_merge <- FindNeighbors(seurat_obj_merge, dims = 1:15)  # Use the number of PCA components as needed
+
+# Perform clustering
+seurat_obj_merge <- FindClusters(seurat_obj_merge, resolution = 1)  # Adjust resolution as needed
+#identified 38 communities (clusters) with a maximum modularity score of 0.9142. This score suggests that the clusters are well-defined.
+```
+
+```{r}
+# UMAP to further reduce the dimensionality and visualize the data in 2D space.
+seurat_obj_merge <- RunUMAP(seurat_obj_merge, dims = 1:15)
+DimPlot(seurat_obj_merge, reduction = "umap", split.by="gender", group.by="cell_type")
+
+
+```
+
+```{r}
+all_features <- rownames(seurat_obj_merge[["RNA"]])
+head(all_features)  # View the first few features
+all_features_df <- as.data.frame(all_features)
+any(all_features_df == "ENTPD1")
+
+FeaturePlot(seurat_obj_merge,reduction = "umap",features="ACVRL1",split.by="cell_type")
+```
+
+```{r}
+# More genes of interest
+FeaturePlot(seurat_obj_merge, reduction = "umap", features = c("ACVRL1", "CXCL6", "CTHRC1", "ENTPD1"), combine = TRUE)
+
+```
+
+```{r}
+# Extract UMAP coordinates
+umap_coords <- Embeddings(seurat_obj_merge, reduction = "umap")
+
+# Extract gene expression data and metadata
+gene_data <- FetchData(seurat_obj_merge, vars = c("ACVRL1", "CXCL6", "ENG", "ISLR",
+                                                  "CTHRC1", "NT5E", "SOST", "IGFBP3",
+                                                  "cell_type"))
+
+# Combine UMAP coordinates with gene expression data
+umap_data <- cbind(umap_coords, gene_data)
+
+# View the first few rows of the combined data
+head(umap_data)
+
+# Use ggplot to create custom plots
+ggplot(umap_data, aes(x = umap_1, y = umap_2, color = ACVRL1 + CXCL6 + CTHRC1 + NT5E)) +
+  geom_point() +
+  facet_wrap(~ cell_type) +
+  scale_color_gradient(low = "lightgrey", high = "blue") +
+  theme_minimal() +
+  ggtitle("Combined Gene Expression on UMAP")
+
+```
+
+```{r}
+library(reshape2)
+library(ggplot2)
+
+# Reshape the data to long format
+umap_long <- melt(umap_data, id.vars = c("umap_1", "umap_2", "cell_type"), 
+                  measure.vars = c("ACVRL1", "ENG", "CXCL6", "NT5E"),
+                  variable.name = "gene", value.name = "expression")
+
+# View the first few rows of the reshaped data
+head(umap_long)
+
+# Use ggplot to create custom plots with different colors for each gene
+ggplot(umap_long, aes(x = umap_1, y = umap_2, color = expression)) +
+  geom_point() +
+  facet_grid(gene ~ cell_type) +  # Facet by gene and cell type
+  scale_color_gradient(low = "lightgrey", high = "blue") +
+  theme_minimal() +
+  ggtitle("Gene Expression on UMAP") +
+        scale_y_discrete(
+          labels = c("ACVRL1" = "ALK1", "CXCL6" = "CXCL6", "ENG" = "CD105", "NT5E" = "CD73")
+          )
+
+gene_labels_try <- c("ACVRL1" = "ALK1", "CXCL6" = "CXCL6", "ENG" = "CD105", "NT5E" = "CD73")
+
+ggplot(umap_long, aes(x = umap_1, y = umap_2, color = expression)) +
+  geom_point() +
+  facet_grid(gene ~ cell_type, labeller = labeller(gene = gene_labels_try)) +  # Facet by gene and cell type, use custom labels
+  scale_color_gradient(low = "lightgrey", high = "blue") +
+  theme_minimal() +
+  ggtitle("Gene Expression on UMAP")
+
+```
+
+```{r}
+# Reshape the data to long format
+umap_long <- melt(umap_data, id.vars = c("umap_1", "umap_2", "cell_type"), 
+                  measure.vars = c("CTHRC1", "SOST", "IGFBP3", "ISLR"),
+                  variable.name = "gene", value.name = "expression")
+
+# View the first few rows of the reshaped data
+head(umap_long)
+
+# Use ggplot to create custom plots with different colors for each gene
+ggplot(umap_long, aes(x = umap_1, y = umap_2, color = expression)) +
+  geom_point() +
+  facet_grid(gene ~ cell_type) +  # Facet by gene and cell type
+  scale_color_gradient(low = "lightgrey", high = "blue") +
+  theme_minimal() +
+  ggtitle("Gene Expression on UMAP") +
+        scale_y_discrete(
+          labels = c("ACVRL1" = "ALK1", "CXCL6" = "CXCL6", "ENG" = "CD105", "NT5E" = "CD73")
+          )
+
+gene_labels_try <- c("ACVRL1" = "ALK1", "CXCL6" = "CXCL6", "ENG" = "CD105", "NT5E" = "CD73")
+
+ggplot(umap_long, aes(x = umap_1, y = umap_2, color = expression)) +
+  geom_point() +
+  facet_grid(gene ~ cell_type, labeller = labeller(gene = gene_labels_try)) +  # Facet by gene and cell type, use custom labels
+  scale_color_gradient(low = "lightgrey", high = "blue") +
+  theme_minimal() +
+  ggtitle("Gene Expression on UMAP")
+
+```
+
+```{r}
+# Assuming you have a Seurat object with multiple assays or layers
+
+DimPlot(seurat_obj_merge, reduction = "umap")  # or "tsne" if you used t-SNE
+DefaultAssay(seurat_obj_merge) <- "RNA"  # Or "integrated" if using integrated data
+
+
+#install.packages('devtools')
+#devtools::install_github('immunogenomics/presto', force=TRUE)
+
+cluster_markers <- FindAllMarkers(seurat_obj_merge)
+
+
+
+```
+
+
+```{r, include=FALSE}
+# Filter markers based on adjusted p-value and fold-change
+significant_markers <- cluster_markers %>%
+  filter(p_val_adj < 0.05 & abs(avg_log2FC) > 1.0)
+
+# View the top significant markers
+head(significant_markers)
+
+# Example: Visualize the top markers
+top_markers <- significant_markers %>% 
+  group_by(cluster) %>% 
+  top_n(n = 10, wt = avg_log2FC)  # Top 10 markers per cluster based on log fold-change
+
+# Check for duplicated gene names
+anyDuplicated(top_markers$gene)
+
+# Remove duplicated gene names
+unique_genes <- unique(top_markers$gene)
+
+# Use unique genes for plotting
+#DotPlot(seurat_obj_merge, features = unique(top_markers$gene))
+
+#save.image(file = "my_workspace_global.RData")
+
+```
+
+
+```{r, include=FALSE}
+VlnPlot(seurat_obj_merge, features = "ACVRL1", group.by = "cell_type")
+
+DotPlot(seurat_obj_merge, features = "ACVRL1") + RotatedAxis()
+```
+
+
+```{r}
+# Example of subsetting if you have a column `cell_type` in metadata
+endothelial_cells <- subset(seurat_obj_merge, subset = cell_type == "Endothelial")
+smooth_muscle_cells <- subset(seurat_obj_merge, subset = cell_type == "Smooth_muscle_cells")
+fibro_cells <- subset(seurat_obj_merge, subset = cell_type == "Fibroblast")
+
+# Set identities to cell types or clusters
+Idents(seurat_obj_merge) <- seurat_obj_merge$cell_type
+
+# Compare differential expression of ACVRL1 between endothelial and FB (reference)
+markers_comparison_ECtoFibro <- FindMarkers(seurat_obj_merge, ident.1 = "Endothelial", ident.2 = "Fibroblast", parallel = TRUE, n.cores = 4)
+
+# Extract expression data for ACVRL1
+acvrl1_expression <- FetchData(seurat_obj_merge, vars = c("ACVRL1","ENG", "CTHRC1", "CXCL6", "ISLR",
+                                                          "IGFBP3", "SOST", "NT5E",
+                                                          "cell_type"))
+
+```
+
+```{r}
+# Check summary statistics of ACVRL1 expression
+#summary(acvrl1_expression$ACVRL1)
+
+# Check if 'ACVRL1' is in the results
+if("ACVRL1" %in% rownames(markers_comparison_ECtoFibro)) {
+  # Extract information for ACVRL1
+  acvrl1_results <- markers_comparison_ECtoFibro["ACVRL1", ]
+  
+  # View the results
+  print(acvrl1_results)
+} else {
+  # If ACVRL1 is not found in the results
+  cat("ACVRL1 is not found in the differential expression results.\n")
+}
+
+```
+
+```{r}
+# Exctract all
+# Define the list of genes you're interested in
+genes_of_interest <- c("ACVRL1", "ENG", "CTHRC1", "CXCL6", "ISLR", "IGFBP3", "SOST", "NT5E")
+
+# Initialize an empty list to store the results
+gene_results <- list()
+
+# Loop through each gene
+for (gene in genes_of_interest) {
+  if (gene %in% rownames(markers_comparison_ECtoFibro)) {
+    # Extract the results for the gene and store in the list
+    gene_results[[gene]] <- markers_comparison_ECtoFibro[gene, ]
+    
+    # Optionally, print the results
+    print(gene_results[[gene]])
+  } else {
+    cat(gene, "is not found in the differential expression results.\n")
+  }
+}
+
+# You can now access each gene's results by name, e.g., gene_results$ACVRL1
+
+```
+
+
+```{r}
+# Multiple comparisons
+# Compare Endothelial vs. Smooth Muscle Cells
+markers_endothelial_vs_smooth <- FindMarkers(seurat_obj_merge, ident.1 = "Endothelial", ident.2 = "Smooth_muscle_cells")
+
+# Compare Endothelial vs. Fibroblasts
+markers_endothelial_vs_peri <- FindMarkers(seurat_obj_merge, ident.1 = "Endothelial", ident.2 = "Pericytes")
+
+# Compare Smooth Muscle Cells vs. Fibroblasts
+markers_smooth_vs_fibroblasts <- FindMarkers(seurat_obj_merge, ident.1 = "Smooth_muscle_cells", ident.2 = "Fibroblast", parallel = TRUE, n.cores = 4)
+
+# Initialize a list to store results
+results_list <- list()
+
+# Extract results for ACVRL1 for each comparison
+if("ACVRL1" %in% rownames(markers_endothelial_vs_smooth)) {
+  results_list$Endothelial_vs_Smooth <- markers_endothelial_vs_smooth["ACVRL1", ]
+} else {
+  results_list$Endothelial_vs_Smooth <- NA
+}
+
+if("ACVRL1" %in% rownames(markers_endothelial_vs_peri)) {
+  results_list$Endothelial_vs_Peri <- markers_endothelial_vs_peri["ACVRL1", ]
+} else {
+  results_list$Endothelial_vs_Peri <- NA
+}
+
+if("ACVRL1" %in% rownames(markers_smooth_vs_fibroblasts)) {
+  results_list$Smooth_vs_Peri <- markers_smooth_vs_fibroblasts["ACVRL1", ]
+} else {
+  results_list$Smooth_vs_Peri <- NA
+}
+
+if("ACVRL1" %in% rownames(markers_comparison_ECtoFibro)) {
+  results_list$Endothelial_vs_Fibro <- markers_comparison_ECtoFibro["ACVRL1", ]
+} else {
+  results_list$Endothelial_vs_Fibro <- NA
+}
+
+# Convert the list to a data frame 
+acvrl1_combined_results <- do.call(rbind, lapply(results_list, as.data.frame))
+
+# Add row names for clarity
+acvrl1_combined_results$Comparison <- rownames(acvrl1_combined_results)
+
+# Set row names to NULL
+rownames(acvrl1_combined_results) <- NULL
+
+# View the combined results
+print(acvrl1_combined_results)
+
+```
+
+```{r}
+# Define the list of genes you're interested in
+genes_of_interest <- c("ACVRL1", "ENG", "CTHRC1", "CXCL6", "ISLR", "IGFBP3", "SOST", "NT5E")
+
+# Define the comparisons and their corresponding result variables
+comparisons <- list(
+  "Endothelial_vs_Smooth" = markers_endothelial_vs_smooth,
+  "Endothelial_vs_Peri" = markers_endothelial_vs_peri,
+  "Smooth_vs_Fibroblasts" = markers_smooth_vs_fibroblasts,
+  "Endothelial_vs_Fibro" = markers_comparison_ECtoFibro
+)
+
+# Initialize a list to store results for all genes
+all_genes_results <- list()
+
+# Loop through each gene and each comparison
+for (gene in genes_of_interest) {
+  gene_results <- list()  # Initialize a list to store results for the current gene
+  
+  for (comparison_name in names(comparisons)) {
+    markers <- comparisons[[comparison_name]]
+    
+    if (gene %in% rownames(markers)) {
+      gene_results[[comparison_name]] <- markers[gene, ]
+    } else {
+      gene_results[[comparison_name]] <- NA
+    }
+  }
+  
+  # Convert the gene-specific list to a data frame
+  gene_df <- do.call(rbind, lapply(gene_results, as.data.frame))
+  
+  # Add the gene name and comparison names as columns
+  gene_df$Gene <- gene
+  gene_df$Comparison <- rownames(gene_df)
+  
+  # Store the data frame in the main results list
+  all_genes_results[[gene]] <- gene_df
+}
+
+# Combine all results into a single data frame
+cxcl6 <- as.data.frame(all_genes_results$CXCL6)
+acvrl1 <- as.data.frame(all_genes_results$ACVRL1)
+sost <- as.data.frame(all_genes_results$SOST)
+islr <- as.data.frame(all_genes_results$ISLR)
+igfbp3 <- as.data.frame(all_genes_results$IGFBP3)
+eng <- as.data.frame(all_genes_results$ENG)
+nt5e <- as.data.frame(all_genes_results$NT5E)
+cthrc1 <- as.data.frame(all_genes_results$CTHRC1)
+
+# View the combined results
+print(cxcl6)
+print(acvrl1)
+print(sost)
+print(islr)
+print(eng)
+print(igfbp3)
+
+
+```
+
+
+```{r}
+# Create bar plot for log fold changes
+p <- ggplot(acvrl1, aes(x = Comparison, y = avg_log2FC, fill = Comparison)) +
+  geom_bar(stat = "identity", color = "black") +
+  theme_minimal() +
+  labs(
+    title = "Log Fold Change of ACVRL1 in Different Comparisons",
+    x = "Comparison",
+    y = "Log Fold Change (log2FC)"
+  ) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))  # Rotate x-axis labels for better readability
+
+# Print plot
+p
+```
+
+```{r}
+# Asterisks
+df_asterisks <- acvrl1 %>%
+  mutate(p_asterisks = case_when(
+    p_val < 0.001 ~ "***",
+    p_val < 0.01 ~ "**",
+    p_val < 0.05 ~ "*",
+    TRUE ~ ""
+  ))
+
+# Create bar plot with log fold change and p-value annotations
+p2 <- ggplot(df_asterisks, aes(x = Comparison, y = avg_log2FC, fill = Comparison)) +
+  geom_bar(stat = "identity", color = "black") +
+  geom_text(aes(label = p_asterisks), vjust = -0.5, size = 10) +  # Add p-value text
+  theme_minimal() +
+  labs(
+    title = "Log Fold Change of ALK1",
+    x = "Comparison",
+    y = "Log Fold Change (log2FC)"
+  ) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) 
+
+p2 <- p2 + scale_fill_brewer(palette = "Dark2") +
+theme(
+    axis.text.x = element_text(angle = 45, hjust = 1, size = 16),  # Increase x-axis text size
+    axis.text.y = element_text(size = 16),  # Increase y-axis text size
+    axis.title.x = element_text(size = 16),  # Increase x-axis label size
+    axis.title.y = element_text(size = 16),   # Increase y-axis label size
+    plot.title = element_text(hjust = 0.5, size = 16)  # Center the plot title
+  )
+
+p2 <- p2 + scale_y_continuous(limits = c(-3, 6), breaks = seq(-3, 6, by = 1))  # Extend y-axis to 6 with ticks every 1 unit
+
+p2
+```
+
+```{r}
+# Save as a PNG file with custom dimensions and resolution
+ggsave("ALK1_logFC.png", plot = p2, width = 10, height = 8, dpi = 1200)
+```
+
+```{r}
+save.image(file = "my_workspace_global.RData")
+```
+
+
+```{r, include=FALSE, include=FALSE}
+# Example data frame
+acvrl1_expression <- data.frame(
+  cell_type = seurat_obj_merge$cell_type,  # Assuming ident contains cell type information
+  ACVRL1 = seurat_obj_merge[["RNA"]]$data["ACVRL1", ]
+)
+
+# Extract p-value for specific comparison
+# Replace 'Endothelial_vs_Smooth' with the actual comparison you are interested in
+p_value <- acvrl1_combined_results[acvrl1_combined_results$Comparison == "Endothelial_vs_Smooth", "p_val_adj"]
+
+# Boxplot with p-value annotation
+p <- ggplot(acvrl1_expression, aes(x = cell_type, y = ACVRL1)) +
+  geom_boxplot(outlier.shape = NA) +  # Remove outliers if necessary
+  geom_jitter(width = 0.2, alpha = 0.5) +
+  theme_minimal() +
+  labs(
+    title = "ACVRL1 Expression by Cell Type",
+    y = "ACVRL1 Expression",
+    x = "Cell Type"
+  ) +
+  annotate(
+    "text", 
+    x = Inf, y = Inf, 
+    label = paste("p-value:", formatC(p_value, format = "e", digits = 2)),
+    hjust = 1.1, vjust = 1.1, 
+    size = 5
+  )
+
+# Print plot
+print(p)
+
+```
+
+```{r}
+# Set identities to cell types or clusters
+Idents(seurat_obj_merge) <- seurat_obj_merge$cell_type
+VlnPlot(seurat_obj_merge, features = "ACVRL1", group.by = "cell_type", sort = TRUE)
+VlnPlot(seurat_obj_merge, features = "CTHRC1", group.by = "cell_type", sort = TRUE)
+VlnPlot(seurat_obj_merge, features = "CXCL6", group.by = "cell_type", sort = TRUE)
+VlnPlot(seurat_obj_merge, features = "NT5E", group.by = "cell_type", sort = TRUE)
+```
+
+```{r}
+# Define the donor of interest
+#donor_of_interest <- "D1"  # Replace with the actual donor ID
+
+# Subset the Seurat object
+#seurat_obj_donor <- subset(seurat_obj, subset = donor == donor_of_interest)
+
+# Check if 'cell_type' is a valid column for identities
+#if (!"cell_type" %in% colnames(seurat_obj_donor@meta.data)) {
+ # stop("'cell_type' is not found in metadata")
+#}
+
+# Set identities to cell types
+#Idents(seurat_obj_donor) <- "cell_type"
+
+# Generate the violin plot
+#VlnPlot(seurat_obj_donor, features = "CTHRC1", group.by = "cell_type", sort = TRUE)
+
+```
+
+```{r}
+# Co-Expression
+# Plot the expression of ACVRL1, CXCL6, ENG, and CD73
+FeaturePlot(seurat_obj_merge, features = c("ACVRL1", "CXCL6", "ENG", "NT5E"), ncol = 2) 
+
+# Create a DotPlot for the genes of interest
+DotPlot(seurat_obj_merge, features = c("ACVRL1", "CXCL6", "ENG", "NT5E", "CTHRC1"), group.by = "cell_type") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  scale_x_discrete(labels = c("ACVRL1" = "ACVRL1", "CXCL6" = "CXCL6", "ENG" = "CD105", "NT5E" = "CD73"))
+
+# Create a DotPlot for the genes of interest
+DotPlot(seurat_obj_merge, 
+        features = c("CTHRC1", "CXCL6", "NT5E", "ENG", "ACVRL1", 
+                     "ISLR", "SOST", "IGFBP3",
+                     "CDH5", "VWF", "PECAM1",
+                     "DCN", "GSN", "PDGFRA"), 
+        group.by = "cell_type",
+        dot.scale = 8) +
+        #scale_size(range = c(2, 10)) +
+        theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+        scale_x_discrete(
+          labels = c("CTHRC1" = "CTHRC1", "CXCL6" = "CXCL6", 
+                     "ENG" = "CD105", "NT5E" = "CD73", "ACVRL1" = "ALK1",
+                     "THY1" = "CD90", "KIT" = "c-Kit")
+          ) +
+        labs(x = NULL, y = NULL)
+
+# Create a DotPlot for the genes of interest
+DotPlot(seurat_obj_merge, 
+        features = c("CTHRC1", "CXCL6", "NT5E", "ENG", "ACVRL1", 
+                     "ISLR", "SOST", "IGFBP3",
+                     "THY1", "KIT", "COL3A1", "HLA-B",
+                     "CREG1", "GDF2"), 
+        group.by = "cell_type",
+        dot.scale = 8) +
+        #scale_size(range = c(2, 10)) +
+        theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+        scale_x_discrete(
+          labels = c("CTHRC1" = "CTHRC1", "CXCL6" = "CXCL6", 
+                     "ENG" = "CD105", "NT5E" = "CD73", "ACVRL1" = "ALK1",
+                     "THY1" = "CD90", "KIT" = "c-Kit")
+          ) +
+        labs(x = NULL, y = NULL)
+
+```
+
+```{r}
+# Extract expression data for the genes of interest
+expression_data <- FetchData(seurat_obj_merge, vars = c("ACVRL1", "CXCL6", "ENG", 
+                                                        "NT5E", "CTHRC1", "VWF", "CDH5",
+                                                        "PECAM1"))
+
+# Compute the correlation matrix
+correlation_matrix <- cor(expression_data, use = "pairwise.complete.obs")
+
+# Print the correlation matrix
+print(correlation_matrix)
+
+library(ggplot2)
+library(reshape2)
+
+# Convert correlation matrix to long format for ggplot
+correlation_melted <- melt(correlation_matrix)
+
+# heat map correlation heatmap
+ggplot(correlation_melted, aes(x = Var1, y = Var2, fill = value)) +
+  geom_tile() +
+  scale_fill_gradient2(low = "blue", high = "red", mid = "white", midpoint = 0) +
+  theme_minimal() +
+  labs(x = "", y = "", fill = "Correlation") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  scale_x_discrete(labels = c("ACVRL1" = "ACVRL1", "CXCL6" = "CXCL6", "ENG" = "CD105", "NT5E" = "CD73"))  +
+  scale_y_discrete(labels = c("ACVRL1" = "ACVRL1", "CXCL6" = "CXCL6", "ENG" = "CD105", "NT5E" = "CD73")) + 
+   geom_text(aes(label = round(value, 1)), color = "black", size = 3) 
+
+
+```
+
+```{r}
+# Plot the expression of ACVRL1 and ENG
+FeaturePlot(seurat_obj_merge, features = c("ACVRL1", "CXCL6"), cols = c("lightgrey", "blue", "red"), ncol = 2)
+
+```
+
+
+```{r}
+sessionInfo()
+```
+
+
